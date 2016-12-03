@@ -1,0 +1,137 @@
+#!/usr/bin/env python
+import argparse
+import crypt
+import shemutils
+import string
+import itertools
+from sys import stdout, exit
+from multiprocessing import cpu_count, Pool
+from gevent.event import Event
+from time import time, sleep
+import gc
+
+
+gc.enable()
+
+write = stdout.write
+flush = stdout.flush
+logger = shemutils.Logger("pwnuke")
+salt = ""
+
+
+class Charset(object):
+    def __init__(self, chrset=string.letters.join("0123456789"), max_len=None):
+        self.chrset = chrset
+        self.max_len = len(self.chrset) if max_len is None else max_len
+        self.current_len = 5
+        self.generator = itertools.product(self.chrset, repeat=self.current_len)
+
+    def get(self):
+        try:
+            return self.format_data(self.generator.next())
+        except StopIteration:
+            self.current_len += 1
+            self.generator = itertools.product(self.chrset, repeat=self.current_len)
+            return self.format_data(self.generator.next())
+
+    @staticmethod
+    def format_data(p):
+        return ''.join(p)
+
+
+def get_hash(word, salt):
+    return crypt.crypt(word, salt)[18:]
+
+
+def compare(word):
+    global salt
+    global h
+    if get_hash(word, salt) == h:
+        logger.info("Password has been cracked! - '%s'" % word)
+        return word
+    return 0
+
+
+class Bruter(object):
+    def __init__(self, uhash, algo, salt):
+        self.logger = logger
+        self.hash = uhash
+        self.algo = algo
+        self.salt = "$" + str(self.algo) + "$" + salt
+        self._set_global_salt()
+        self.pool = Pool(processes=cpu_count())
+        self.wordlist = Charset()
+        self.cracked = Event()
+        self.logger.debug("Hash: {0}".format(self.hash))
+        self.logger.debug("Salt: {0}".format(self.salt))
+        self.logger.debug("Press <ENTER> to start cracking.")
+        self.t1 = time()
+        p = raw_input()
+
+    def _set_global_salt(self):
+        global salt
+        salt = self.salt
+        return 0
+
+    def _get_hash(self, word):
+        return crypt.crypt(word, self.salt)[18:]
+
+    def _compare(self, w):
+        if self._get_hash(w) == self.hash:
+            self.cracked.set()
+            self.logger.info("\nPassword has been cracked! - '%s'\n" % w)
+        return
+
+    def tpermin(self, t):
+        t_elapsed = time() - self.t1
+        return "%2.f" % (t / t_elapsed)
+
+    def start(self):
+        t = 0
+        result = {}
+
+        try:
+            self.logger.info("Starting to crack hash ...")
+
+            for w in self.wordlist.generator:
+                word = self.wordlist.format_data(w)
+                result[t] = (self.pool.map_async(compare, (word,)))
+                t += 1
+
+                if t % 64 == 0:
+                    write("Tries: {0} [{1}/min] \r".format(t, self.tpermin(t)))
+                    flush()
+                    for k in result:
+                        result[k].wait()
+
+
+        except KeyboardInterrupt:
+            self.logger.critical("User aborted program.")
+            for k in result:
+                result[k].get(timeout=1)
+            self.pool.close()
+            self.pool.join()
+            return 0
+
+
+def main():
+    global salt
+    global h
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-p", "--hash", help="Hash do crack", required=True)
+    parser.add_argument("-s", "--salt", help="Password hash salt", required=True)
+    parser.add_argument("-a", "--algorithm", help="Algorithm used to hash the password", required= True)
+    parser.add_argument("-c", "--charset", help="Charset to use", required=False)
+    parser.add_argument("-l", "--length", help="Maximum length to try for passwords", required=False)
+    args = parser.parse_args()
+    salt = args.salt
+    h = args.hash
+    b = Bruter(args.hash, args.algorithm, args.salt)
+    if args.charset is not None:
+        b.wordlist = Charset(chrset=args.charset, max_len=args.length)
+    b.start()
+    return
+
+
+if __name__ == "__main__":
+    main()
